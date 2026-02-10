@@ -1,37 +1,52 @@
 #!/usr/bin/env bash
 # flactopus.sh — Convert all .flac files recursively to high-quality .opus and delete originals.
-# Usage: ./flactopus.sh [directory] [--yes|-y] [--jobs|-j N]
+# Usage: ./flactopus.sh [directory] [--yes|-y] [--jobs|-j N] [--dry-run] [--keep] [--bitrate|-b RATE]
 
 set -o pipefail
 
 # --- Argument parsing (flags in any order) ---
 SOURCE_DIR=""
 AUTO_YES=false
+DRY_RUN=false
+KEEP_FLAC=false
 JOBS=1
+BITRATE="192k"
 
 show_help() {
     cat <<'HELP'
 Usage: flactopus.sh [OPTIONS] [DIRECTORY]
 
 Convert all .flac files in DIRECTORY (default: current dir) to high-quality
-Opus format (192 kbps VBR) and delete the originals.
+Opus format and delete the originals.
 
 Options:
   -y, --yes          Skip confirmation prompt
   -j, --jobs N       Run N conversions in parallel (default: 1)
+  -b, --bitrate RATE Set Opus bitrate (default: 192k)
+  -n, --dry-run      Show what would be converted without making changes
+  --keep             Convert but don't delete original .flac files
   -h, --help         Show this help message
 
 Examples:
   flactopus.sh /mnt/media/music
   flactopus.sh --yes --jobs 4 /mnt/media/music
-  flactopus.sh .
+  flactopus.sh --dry-run .
+  flactopus.sh --keep --bitrate 128k /mnt/media/music
 HELP
     exit 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -y|--yes)   AUTO_YES=true; shift ;;
+        -y|--yes)      AUTO_YES=true; shift ;;
+        -n|--dry-run)  DRY_RUN=true; shift ;;
+        --keep)        KEEP_FLAC=true; shift ;;
+        -b|--bitrate)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --bitrate requires an argument (e.g. 192k, 128k)." >&2
+                exit 1
+            fi
+            BITRATE="$2"; shift 2 ;;
         -j|--jobs)
             if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+$ || "$2" -lt 1 ]]; then
                 echo "Error: --jobs requires a positive integer argument." >&2
@@ -62,17 +77,25 @@ command -v ffmpeg >/dev/null 2>&1 || { echo "Error: ffmpeg not found. Please ins
 echo "============================================"
 echo "FLACTOPUS — FLAC -> Opus Converter"
 echo "Source directory: $SOURCE_DIR"
-echo "Log file: $LOG_FILE"
-echo "Parallel jobs: $JOBS"
+echo "Bitrate:         $BITRATE"
+if [[ "$DRY_RUN" == true ]]; then
+    echo "Mode:            DRY RUN (no changes)"
+elif [[ "$KEEP_FLAC" == true ]]; then
+    echo "Mode:            Keep originals"
+fi
+echo "Parallel jobs:   $JOBS"
+echo "Log file:        $LOG_FILE"
 echo "============================================"
 echo
 
 # --- Log session header ---
-{
-    echo ""
-    echo "=== flactopus session: $(date '+%Y-%m-%d %H:%M:%S') ==="
-    echo "Source: $SOURCE_DIR"
-} >> "$LOG_FILE"
+if [[ "$DRY_RUN" != true ]]; then
+    {
+        echo ""
+        echo "=== flactopus session: $(date '+%Y-%m-%d %H:%M:%S') ==="
+        echo "Source: $SOURCE_DIR"
+    } >> "$LOG_FILE"
+fi
 
 # --- Scanning phase ---
 echo -n "Scanning for .flac files..."
@@ -90,8 +113,37 @@ TOTAL_FLAC_SIZE=$(find "$SOURCE_DIR" -type f -iname "*.flac" -printf "%s\n" | aw
 TOTAL_FLAC_HR=$(numfmt --to=iec --suffix=B "$TOTAL_FLAC_SIZE" 2>/dev/null)
 echo " $TOTAL_FLAC_HR"
 
+# --- Dry-run mode ---
+if [[ "$DRY_RUN" == true ]]; then
+    echo
+    echo "Files that would be converted:"
+    dr_skip=0
+    dr_convert=0
+    for f in "${FLAC_FILES[@]}"; do
+        dr_basename="${f##*/}"
+        dr_dirpath="${f%/*}"
+        dr_stem="${dr_basename%.[fF][lL][aA][cC]}"
+        dr_opus="${dr_dirpath}/${dr_stem}.opus"
+        if [[ -f "$dr_opus" ]]; then
+            echo "  [SKIP]    $f (opus already exists)"
+            ((dr_skip++))
+        else
+            echo "  [CONVERT] $f"
+            ((dr_convert++))
+        fi
+    done
+    echo
+    echo "$dr_convert file(s) to convert, $dr_skip to skip."
+    echo "Dry run complete. No files were modified."
+    exit 0
+fi
+
 if [[ "$AUTO_YES" != true ]]; then
-    read -rp "Proceed with conversion and deletion of .flac files? [y/N] " proceed_choice
+    if [[ "$KEEP_FLAC" == true ]]; then
+        read -rp "Proceed with conversion? (originals will be kept) [y/N] " proceed_choice
+    else
+        read -rp "Proceed with conversion and deletion of .flac files? [y/N] " proceed_choice
+    fi
     if [[ ! "$proceed_choice" =~ ^[Yy]$ ]]; then
         echo "Aborted. No changes made."
         exit 0
@@ -113,6 +165,9 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
+# Snapshot pre-existing opus size so the summary only counts new files
+PRE_OPUS_SIZE=$(find "$SOURCE_DIR" -type f -iname "*.opus" -printf "%s\n" | awk '{sum+=$1} END {print sum+0}')
+
 # --- Conversion function ---
 convert_flac() {
     local flac_file="$1"
@@ -132,10 +187,14 @@ convert_flac() {
     echo "[CONVERT] $(basename "$flac_file")" | tee -a "$LOG_FILE"
 
     if ffmpeg -nostdin -hide_banner -loglevel error -y -i "$flac_file" \
-        -c:a libopus -b:a 192k -vbr on -compression_level 10 \
+        -c:a libopus -b:a "$BITRATE" -vbr on -compression_level 10 \
         -application audio -map_metadata 0 "$opus_file" < /dev/null; then
-        rm -f "$flac_file"
-        echo "[DONE] Converted and deleted $(basename "$flac_file")" | tee -a "$LOG_FILE"
+        if [[ "$KEEP_FLAC" != true ]]; then
+            rm -f "$flac_file"
+            echo "[DONE] Converted and deleted $(basename "$flac_file")" | tee -a "$LOG_FILE"
+        else
+            echo "[DONE] Converted $(basename "$flac_file") (original kept)" | tee -a "$LOG_FILE"
+        fi
         CURRENT_OPUS=""
         return 0
     else
@@ -158,7 +217,7 @@ SUCCESS_COUNT=0
 if [[ "$JOBS" -gt 1 ]]; then
     # Parallel mode using xargs
     export -f convert_flac
-    export LOG_FILE CURRENT_OPUS
+    export LOG_FILE CURRENT_OPUS BITRATE KEEP_FLAC
 
     printf '%s\0' "${FLAC_FILES[@]}" | xargs -0 -P "$JOBS" -I{} bash -c '
         convert_flac "$@"
@@ -190,22 +249,27 @@ echo
 echo "Calculating space usage..."
 
 REMAINING_FLAC_SIZE=$(find "$SOURCE_DIR" -type f -iname "*.flac" -printf "%s\n" | awk '{sum+=$1} END {print sum+0}')
-TOTAL_OPUS_SIZE=$(find "$SOURCE_DIR" -type f -iname "*.opus" -printf "%s\n" | awk '{sum+=$1} END {print sum+0}')
+POST_OPUS_SIZE=$(find "$SOURCE_DIR" -type f -iname "*.opus" -printf "%s\n" | awk '{sum+=$1} END {print sum+0}')
 
-# Space saved = original flac that was actually converted (total - remaining) minus opus produced
+# Only count opus files created during this run
+NEW_OPUS_SIZE=$((POST_OPUS_SIZE - PRE_OPUS_SIZE))
 CONVERTED_FLAC_SIZE=$((TOTAL_FLAC_SIZE - REMAINING_FLAC_SIZE))
-SAVED=$((CONVERTED_FLAC_SIZE - TOTAL_OPUS_SIZE))
-if [[ "$SAVED" -lt 0 ]]; then
-    SAVED=0
+
+NEW_OPUS_HR=$(numfmt --to=iec --suffix=B "$NEW_OPUS_SIZE" 2>/dev/null)
+echo "New Opus files:     $NEW_OPUS_HR"
+
+if [[ "$KEEP_FLAC" == true ]]; then
+    echo "Originals:          Kept (no disk space freed)"
+else
+    SAVED=$((CONVERTED_FLAC_SIZE - NEW_OPUS_SIZE))
+    if [[ "$SAVED" -lt 0 ]]; then
+        SAVED=0
+    fi
+    SAVED_HR=$(numfmt --to=iec --suffix=B "$SAVED" 2>/dev/null)
+    echo "Space saved:        $SAVED_HR"
 fi
 
-SAVED_HR=$(numfmt --to=iec --suffix=B "$SAVED" 2>/dev/null)
-TOTAL_OPUS_HR=$(numfmt --to=iec --suffix=B "$TOTAL_OPUS_SIZE" 2>/dev/null)
-
-echo "Total Opus size:    $TOTAL_OPUS_HR"
-echo "Space saved:        $SAVED_HR"
-
-if [[ "$REMAINING_FLAC_SIZE" -gt 0 ]]; then
+if [[ "$KEEP_FLAC" != true && "$REMAINING_FLAC_SIZE" -gt 0 ]]; then
     REMAINING_HR=$(numfmt --to=iec --suffix=B "$REMAINING_FLAC_SIZE" 2>/dev/null)
     REMAINING_COUNT=$(find "$SOURCE_DIR" -type f -iname "*.flac" | wc -l)
     echo "Remaining FLAC:     $REMAINING_HR ($REMAINING_COUNT files — check log for errors)"
