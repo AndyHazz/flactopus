@@ -35,6 +35,9 @@ flactopus.sh [OPTIONS] [DIRECTORY]
 |--------|-------------|
 | `-y`, `--yes` | Skip confirmation prompt |
 | `-j N`, `--jobs N` | Run N conversions in parallel (default: 1) |
+| `-b`, `--bitrate RATE` | Set Opus bitrate (default: 192k) |
+| `-n`, `--dry-run` | Show what would be converted without making changes |
+| `--keep` | Convert but don't delete original .flac files |
 | `-h`, `--help` | Show help message |
 
 If no directory is given, the current directory is used.
@@ -48,38 +51,47 @@ If no directory is given, the current directory is used.
 # Skip confirmation and use 4 parallel workers
 ./flactopus.sh --yes --jobs 4 /mnt/media/music
 
-# Convert FLACs in current directory
-./flactopus.sh
+# Preview what would happen without changing anything
+./flactopus.sh --dry-run /mnt/media/music
+
+# Convert at a lower bitrate, keeping originals
+./flactopus.sh --keep --bitrate 128k /mnt/media/music
 ```
 
 ## Example Output
 
+In a terminal, output is colorized with a live progress bar:
+
 ```
-============================================
-FLACTOPUS — FLAC -> Opus Converter
-Source directory: /mnt/media/music
-Log file: /tmp/flactopus.log
-Parallel jobs: 1
-============================================
+  +---------------------------------------+
+  |   FLACTOPUS -- FLAC -> Opus Converter  |
+  +---------------------------------------+
 
-Scanning for .flac files... 128 found.
-Calculating total size... 5.7GiB
-Proceed with conversion and deletion of .flac files? [y/N] y
+  Directory   /mnt/media/music
+  Bitrate     192k
+  Jobs        1
 
-Starting conversion of 128 files...
+  Scanning for .flac files... 128 found.
+  Calculating total size... 5.7GiB
 
-[  1/128] [CONVERT] Track01.flac
-[  1/128] [DONE] Converted and deleted Track01.flac
-[  2/128] [CONVERT] Track02.flac
-...
+  Proceed with conversion and delete originals? [y/N] y
 
-Calculating space usage...
-Total Opus size:    1.8GiB
-Space saved:        3.9GiB
+  Converting 128 files...
 
-All done.
-Log saved to: /tmp/flactopus.log
+  [=====================....] 84% (108/128) Track08.flac
+
+  Results
+  -----------------------------------
+  + Converted      126 files
+  ~ Skipped        2 files
+  -----------------------------------
+  Opus size      1.8GiB
+  Space saved    3.9GiB
+  Elapsed        4m12s
+  Log            /tmp/flactopus.log
 ```
+
+When piped or in non-TTY environments, output falls back to plain text with per-file status lines and no ANSI codes.
 
 ## Log
 
